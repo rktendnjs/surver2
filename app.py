@@ -197,33 +197,7 @@ def correct_and_translate_address(address, mapping_df):
 
     corrected_address = ' '.join(corrected_elements)
     return corrected_address
-
-def perform_address_search(search_data):
-    api_key = 'devU01TX0FVVEgyMDIzMDcyODE1MzkzNzExMzk3MzA='
-    base_url = 'http://www.juso.go.kr/addrlink/addrLinkApi.do'
-
-    payload = {
-        'confmKey': api_key,
-        'currentPage': '1',
-        'countPerPage': '10',
-        'resultType': 'json',
-        'keyword': search_data,
-    }
-
-    response = requests.get(base_url, params=payload)
     
-    
-
-    if response.status_code == 200:
-        search_result = response.json()
-        if 'results' in search_result and 'juso' in search_result['results']:
-            result_data = search_result['results']['juso']
-            if result_data:
-                return [result.get('roadAddr', '') for result in result_data]
-
-    return ['F']
-
-
 # Load data from the Excel file (contains the mapping)
 mapping_file = 'data.xlsx'
 mapping_df = pd.read_excel(mapping_file)
@@ -319,4 +293,4 @@ def perform_address_search(search_data):
 
 
 if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    run(app, host='0.0.0.0', port=5000, debug=True)
