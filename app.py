@@ -1,9 +1,7 @@
 import re
-from pandas import pandas as pd
+import pandas as pd
 import requests
 from flask import Flask, jsonify, request
-from gunicorn.app.wsgiapp import run
-
 
 app = Flask(__name__)
 
@@ -133,6 +131,16 @@ def convert_hybrid_words(text):
     text = text.replace(' Station-ro', 'Station-ro')
     
     return text
+
+
+
+# Load data from the other Excel file (contains the mapping)
+mapping_file = 'data.xlsx'
+mapping_df = pd.read_excel(mapping_file)
+
+# Create a dictionary mapping English words to Korean words
+mapping_dict = dict(zip(mapping_df['로마자표기'], mapping_df['한글']))
+
 # 함수 내 영어 단어를 한글로 변환하는 부분
 def replace_english_with_korean(sentence):
     def replace_word(match):
@@ -141,42 +149,79 @@ def replace_english_with_korean(sentence):
 
     return re.sub(r'\b[A-Za-z-]+\b', replace_word, sentence)
 
-def levenshtein_distance(s1, s2):
-    if len(s1) > len(s2):
-        s1, s2 = s2, s1
 
-    distances = list(range(len(s1) + 1))
-    for index2, char2 in enumerate(s2):
-        new_distances = [index2 + 1]
-        for index1, char1 in enumerate(s1):
-            if char1 == char2:
-                new_distances.append(distances[index1])
-            else:
-                new_distances.append(1 + min(distances[index1], distances[index1 + 1], new_distances[-1]))
-        distances = new_distances
+class TrieNode:
+    def __init__(self):
+        self.children = {}
+        self.is_end_of_word = False
+        self.value = None
 
-    return distances[-1]
+class Trie:
+    def __init__(self):
+        self.root = TrieNode()
 
-def correct_typo(input_word, valid_words):
-    min_distance = float('inf')
-    corrected_word = None
+    def insert(self, word, value):
+        node = self.root
+        for char in word:
+            if char not in node.children:
+                node.children[char] = TrieNode()
+            node = node.children[char]
+        node.is_end_of_word = True
+        node.value = value
 
-    for word in valid_words:
-        distance = levenshtein_distance(input_word, word)
-        if distance < min_distance:
-            min_distance = distance
-            corrected_word = word
+    def search_closest_word(self, word, max_distance):
+        current_row = list(range(len(word) + 1))
+        results = []
 
-    return corrected_word
+        for char in self.root.children:
+            self._search_recursive(self.root.children[char], char, word, current_row, results, max_distance)
 
-def correct_and_translate(input_word, valid_words, mapping_dict):
-    corrected_word = correct_typo(input_word, valid_words)
+        if not results:
+            return None
+        results.sort(key=lambda x: x[0])
+        return results[0][1]
+
+    def _search_recursive(self, node, char, word, previous_row, results, max_distance):
+        columns = len(word) + 1
+        current_row = [previous_row[0] + 1]
+
+        for col in range(1, columns):
+            insert_cost = current_row[col - 1] + 1
+            delete_cost = previous_row[col] + 1
+            replace_cost = previous_row[col - 1]
+
+            if word[col - 1] != char:
+                replace_cost += 1
+
+            current_row.append(min(insert_cost, delete_cost, replace_cost))
+
+        if current_row[-1] <= max_distance and node.is_end_of_word:
+            results.append((current_row[-1], node.value))
+
+        if min(current_row) <= max_distance:
+            for child_char in node.children:
+                self._search_recursive(node.children[child_char], child_char, word, current_row, results, max_distance)
+
+def correct_and_translate(input_word, mapping_dict, trie, max_distance):
+    corrected_word = trie.search_closest_word(input_word, max_distance)
     translated_word = mapping_dict.get(corrected_word, corrected_word)
     return translated_word
 
+# Load mapping data from the Excel file
+mapping_file = 'data.xlsx'
+mapping_df = pd.read_excel(mapping_file)
+mapping_dict = dict(zip(mapping_df['로마자표기'], mapping_df['한글']))
 
-def correct_and_translate_address(address, mapping_df):
-    elements = address.split()
+eng_trie = Trie()
+kor_trie = Trie()
+
+for index, word in enumerate(mapping_df['로마자표기']):
+    eng_trie.insert(word, mapping_df['한글'][index])
+    kor_trie.insert(mapping_df['한글'][index], word)
+
+# 함수 내에서 생성된 결과값(result)을 사용하는 부분
+def process_result(result):
+    elements = result.split()
     corrected_elements = []
 
     for element in elements:
@@ -184,28 +229,20 @@ def correct_and_translate_address(address, mapping_df):
             re.match(r'^\d+번길$|^\d+로$|^\d+길$', element) or
             re.match(r'^[\d-]+$', element)):
             corrected_element = element
-        elif re.match(r'^[a-zA-Z\s-]+$', element):
-            corrected_element = correct_and_translate(element, mapping_df['로마자표기'], mapping_dict)
+        elif re.match('^[a-zA-Z\s-]+$', element):
+            corrected_element = correct_and_translate(element, mapping_dict, eng_trie, 3)
         else:
-            # Check if the Korean word exists in the mapping data, if not, find the closest correction
-            if element not in mapping_df['한글'].tolist():
-                corrected_element = correct_typo(element, mapping_df['한글'])
-            else:
+            corrected_element = correct_and_translate(element, mapping_dict, kor_trie, 1)
+            if not corrected_element:
                 corrected_element = element
 
         corrected_elements.append(corrected_element)
 
     corrected_address = ' '.join(corrected_elements)
     return corrected_address
-    
-# Load data from the Excel file (contains the mapping)
-mapping_file = 'data.xlsx'
-mapping_df = pd.read_excel(mapping_file)
-mapping_dict = dict(zip(mapping_df['로마자표기'], mapping_df['한글']))
 
-# 주소 전처리 및 검색 요청 함수 정의
-@app.route('/send_request', methods=['POST'])
-def send_request():
+@app.route('/search', methods=['POST'])
+def search():
     try:
         if request.is_json:
             request_data = request.get_json()
@@ -245,18 +282,19 @@ def send_request():
             result = replace_english_with_korean(result.strip())  # 영어 단어 한글 변환 적용
             print("After replace_english_with_korean:", result)
             
-            result = correct_and_translate_address(result, mapping_df)
-            print("correct_and_translate_address:", result)
+            result = process_result(result.strip())
+            print("process_result:", result)
+            
 
 
             
             # 주소 검색 결과 가져오기
             result_address = perform_address_search(result)
 
-            if len(result_address) == 1:
-                results.append({'seq': seq, 'resultAddress': result_address[0]})
-            else:
+            if len(result_address) == 0:
                 results.append({'seq': seq, 'resultAddress': 'F'})
+            elif len(result_address) >= 1:
+                results.append({'seq': seq, 'resultAddress': result_address[0]})
 
         response_data = {'HEADER': {'RESULT_CODE': 'S', 'RESULT_MSG': 'Success'}, 'BODY': results}
         return jsonify(response_data)
@@ -272,7 +310,7 @@ def perform_address_search(search_data):
     payload = {
         'confmKey': api_key,
         'currentPage': '1',
-        'countPerPage': '10',
+        'countPerPage': '2',
         'resultType': 'json',
         'keyword': search_data,
     }
@@ -288,9 +326,9 @@ def perform_address_search(search_data):
                 # Extract and return the road addresses from the API response
                 return [result.get('roadAddr', '') for result in result_data]
 
-    return ['F']
-
-
+    return []
 
 if __name__ == "__main__":
-    run(app, host='0.0.0.0', port=5000, debug=True)
+    app.run(host="0.0.0.0", port=8000)
+
+  
