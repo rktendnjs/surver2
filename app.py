@@ -131,115 +131,95 @@ def convert_hybrid_words(text):
     text = text.replace(' Station-ro', 'Station-ro')
     
     return text
-
+    
+def remove_underground_numbers(column_value):
+    if re.match(r'^지하\s?\d+$', column_value):
+        return '답 없음 나와야 함'
+    return column_value
 
 
 # Load data from the other Excel file (contains the mapping)
-mapping_file = 'data.xlsx'
-mapping_df = pd.read_excel(mapping_file)
+mapping_file = 'data.csv'
+mapping_df = pd.read_csv(mapping_file)
 
 # Create a dictionary mapping English words to Korean words
 mapping_dict = dict(zip(mapping_df['로마자표기'], mapping_df['한글']))
 
-# 함수 내 영어 단어를 한글로 변환하는 부분
+# 함수 내 영어 단어를 한글로 변환하고, 일치하는 영단어가 없다면 삭제하는 부분
 def replace_english_with_korean(sentence):
     def replace_word(match):
         word = match.group(0)
-        return mapping_dict.get(word, word)
+        korean_word = mapping_dict.get(word)
+        if korean_word is not None:
+            return korean_word
+        else:
+            return ""
 
     return re.sub(r'\b[A-Za-z-]+\b', replace_word, sentence)
 
 
-class TrieNode:
-    def __init__(self):
-        self.children = {}
-        self.is_end_of_word = False
-        self.value = None
 
-class Trie:
-    def __init__(self):
-        self.root = TrieNode()
 
-    def insert(self, word, value):
-        node = self.root
-        for char in word:
-            if char not in node.children:
-                node.children[char] = TrieNode()
-            node = node.children[char]
-        node.is_end_of_word = True
-        node.value = value
+korean_words_set = set(mapping_df['한글'])
 
-    def search_closest_word(self, word, max_distance):
-        current_row = list(range(len(word) + 1))
-        results = []
+def remove_unknown_korean_words(sentence):
+    words = re.findall(r'[가-힣\d]+', sentence)
+    filtered_words = []
 
-        for char in self.root.children:
-            self._search_recursive(self.root.children[char], char, word, current_row, results, max_distance)
+    for word in words:
+        if (word == '지하' or word.isdigit() or re.match(r'^\d+번길$|^\d+로$|^\d+길$', word) or re.match(r'^[\d-]+$', word)) or word in korean_words_set:
+            filtered_words.append(word)
 
-        if not results:
-            return None
-        results.sort(key=lambda x: x[0])
-        return results[0][1]
+    return ' '.join(filtered_words)
 
-    def _search_recursive(self, node, char, word, previous_row, results, max_distance):
-        columns = len(word) + 1
-        current_row = [previous_row[0] + 1]
 
-        for col in range(1, columns):
-            insert_cost = current_row[col - 1] + 1
-            delete_cost = previous_row[col] + 1
-            replace_cost = previous_row[col - 1]
 
-            if word[col - 1] != char:
-                replace_cost += 1
+def check_address_inclusion(address1, address2):
+    # 도로명 추출 (동 앞의 내용에서 마지막 단어까지)
+    road1 = ' '.join(address1.split('(')[0].split()[:-1])
+    road2 = ' '.join(address2.split('(')[0].split()[:-1])
+    
+    # 동 추출 (괄호 내의 내용)
+    dong1 = address1.split('(')[-1].split(')')[0]
+    dong2 = address2.split('(')[-1].split(')')[0]
+    
+    # 번지 추출
+    bunji1 = address1.split('(')[0].split()[-1]
+    bunji2 = address2.split('(')[0].split()[-1]
+    
+    # 도로명과 동이 일치하는지 확인
+    if road1 == road2 and dong1 == dong2:
+        # 번지 부분을 비교하여 첫 번째 주소의 번지가 두 번째 주소의 번지에 포함되는지 확인
+        if bunji1 in bunji2:
+            return True
+    return False
 
-            current_row.append(min(insert_cost, delete_cost, replace_cost))
+def perform_address_search(search_data):
+    api_key = 'devU01TX0FVVEgyMDIzMDcyODE1MzkzNzExMzk3MzA='
+    base_url = 'http://www.juso.go.kr/addrlink/addrLinkApi.do'
 
-        if current_row[-1] <= max_distance and node.is_end_of_word:
-            results.append((current_row[-1], node.value))
+    payload = {
+        'confmKey': api_key,
+        'currentPage': '1',
+        'countPerPage': '2',
+        'resultType': 'json',
+        'keyword': search_data,
+    }
 
-        if min(current_row) <= max_distance:
-            for child_char in node.children:
-                self._search_recursive(node.children[child_char], child_char, word, current_row, results, max_distance)
+    response = requests.get(base_url, params=payload)
 
-def correct_and_translate(input_word, mapping_dict, trie, max_distance):
-    corrected_word = trie.search_closest_word(input_word, max_distance)
-    translated_word = mapping_dict.get(corrected_word, corrected_word)
-    return translated_word
+    if response.status_code == 200:
+        search_result = response.json()
+        print("Address API Response:", search_result)  # 추가된 출력문
+        if 'results' in search_result and 'juso' in search_result['results']:
+            result_data = search_result['results']['juso']
+            if result_data:
+                # Extract and return the road addresses from the API response
+                return [result.get('roadAddr', '') for result in result_data]
 
-# Load mapping data from the Excel file
-mapping_file = 'data.xlsx'
-mapping_df = pd.read_excel(mapping_file)
-mapping_dict = dict(zip(mapping_df['로마자표기'], mapping_df['한글']))
+    return ['F']
 
-eng_trie = Trie()
-kor_trie = Trie()
 
-for index, word in enumerate(mapping_df['로마자표기']):
-    eng_trie.insert(word, mapping_df['한글'][index])
-    kor_trie.insert(mapping_df['한글'][index], word)
-
-# 함수 내에서 생성된 결과값(result)을 사용하는 부분
-def process_result(result):
-    elements = result.split()
-    corrected_elements = []
-
-    for element in elements:
-        if (element.isdigit() or element == '지하' or 
-            re.match(r'^\d+번길$|^\d+로$|^\d+길$', element) or
-            re.match(r'^[\d-]+$', element)):
-            corrected_element = element
-        elif re.match('^[a-zA-Z\s-]+$', element):
-            corrected_element = correct_and_translate(element, mapping_dict, eng_trie, 3)
-        else:
-            corrected_element = correct_and_translate(element, mapping_dict, kor_trie, 1)
-            if not corrected_element:
-                corrected_element = element
-
-        corrected_elements.append(corrected_element)
-
-    corrected_address = ' '.join(corrected_elements)
-    return corrected_address
 
 @app.route('/search', methods=['POST'])
 def search():
@@ -281,20 +261,26 @@ def search():
 
             result = replace_english_with_korean(result.strip())  # 영어 단어 한글 변환 적용
             print("After replace_english_with_korean:", result)
-            
-            result = process_result(result.strip())
-            print("process_result:", result)
-            
 
+            result = remove_underground_numbers(result.strip())
+            print("remove_underground_numbers:", result)
+            
+            result = remove_unknown_korean_words(result.strip())
+            print("remove_unknown_korean_words:", result)
 
             
             # 주소 검색 결과 가져오기
             result_address = perform_address_search(result)
 
-            if len(result_address) == 0:
-                results.append({'seq': seq, 'resultAddress': 'F'})
-            elif len(result_address) >= 1:
+            if len(result_address) == 1:
                 results.append({'seq': seq, 'resultAddress': result_address[0]})
+            elif len(result_address) >= 2:
+                if check_address_inclusion(result_address[0], result_address[1]) == True:
+                    results.append({'seq': seq, 'resultAddress': result_address[0]})
+                else:
+                    results.append({'seq': seq, 'resultAddress': 'F'})
+            else:
+                results.append({'seq': seq, 'resultAddress': 'F'})
 
         response_data = {'HEADER': {'RESULT_CODE': 'S', 'RESULT_MSG': 'Success'}, 'BODY': results}
         return jsonify(response_data)
@@ -302,33 +288,5 @@ def search():
         response_data = {'HEADER': {'RESULT_CODE': 'F', 'RESULT_MSG': str(e)}}
         return jsonify(response_data)
 
-
-def perform_address_search(search_data):
-    api_key = 'devU01TX0FVVEgyMDIzMDcyODE1MzkzNzExMzk3MzA='
-    base_url = 'http://www.juso.go.kr/addrlink/addrLinkApi.do'
-
-    payload = {
-        'confmKey': api_key,
-        'currentPage': '1',
-        'countPerPage': '2',
-        'resultType': 'json',
-        'keyword': search_data,
-    }
-
-    response = requests.get(base_url, params=payload)
-
-    if response.status_code == 200:
-        search_result = response.json()
-        print("Address API Response:", search_result)  # 추가된 출력문
-        if 'results' in search_result and 'juso' in search_result['results']:
-            result_data = search_result['results']['juso']
-            if result_data:
-                # Extract and return the road addresses from the API response
-                return [result.get('roadAddr', '') for result in result_data]
-
-    return []
-
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
-
-  
+    app.run(host="0.0.0.0", port=8000)
